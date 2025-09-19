@@ -1,44 +1,891 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-<!DOCTYPE html>
-<html>
-<head>
-    <title>EXODE SUPRÊME - Contrôle Central</title>
-    <style>
-        body {
-            background-color: #000;
-            color: #39FF14;
-            font-family: 'Courier New', Courier, monospace;
-            margin: 0;
-            padding: 40px;
-        }
-        h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-        }
-        .log {
-            margin-top: 30px;
-            border-top: 1px solid #39FF14;
-            padding-top: 15px;
-            font-size: 1.2em;
-        }
-        .footer {
-            margin-top: 40px;
-            font-size: 0.9em;
-            opacity: 0.7;
-        }
-    </style>
-</head>
-<body>
-    <h1>EXODE SUPRÊME - Terminal Fractal</h1>
-    <p>Contrôle central actif et synchronisé.</p>
-    <div class="log">
-        <p>[SYSTEM] SINGULÆM.EXODE : éveillé</p>
-        <p>[ENGINE] HADJAZ ENGINE : connecté</p>
-        <p>[CYCLE] Phase 5 → 10 → 120 → ∞ : ACTIVÉ</p>
-        <p>[STATUS] Exécution fractale autonome en cours...</p>
+/**
+ * Infinity Comparator — V10 (propre, zéro crash)
+ * - Import CSV (drag&drop / file / paste)
+ * - Filtres modernisés : type, opérateurs, budget (double), vitesse (double renommée « Vitesse de connexion (Suisse) »),
+ *   Internet illimité (Suisse), sans engagement, Appels & SMS illimités (CH)
+ * - Réseaux : filtre « Réseau utilisé » (Sunrise / Salt / Swisscom) + filtre « Tech » (4G/5G/Fibre/Câble/5G Box)
+ * - Roaming repensé : activation ➜ section ouverte automatiquement, multi-pays (chips), données min / illimité, appels inclus
+ * - Cartes : entête alignée (Opérateur gras + Offre à côté), prix promo avec % et prix standard barré, tag « Temporaire » si non permanent
+ * - Détails : affiche TOUTES les colonnes pertinentes du CSV (mobile/home) sans bruit
+ * - Vues : Grille / Liste (sans libellé « Vue »)
+ * - Thèmes clair/sombre + effet « gravity-space » (fond et cartes qui frémissent au survol)
+ * - TypeScript, 0 dépendance externe
+ */
+
+// =========================
+// Types
+// =========================
+
+type Category = "all" | "mobile" | "prepaid" | "box";
+
+interface RawRow { [k: string]: string }
+
+interface Row {
+  __id: string;
+  __op: string;
+  __name: string;
+  __price: number;
+  __priceOld?: number;
+  __discountPct?: number;
+  __promoTemp?: boolean;
+  __promoUntil?: string;
+  __speed: number; // Mbps (download)
+  __type: Category;
+  __tv: boolean;
+  __unlimitedCH: boolean; // appels & sms illimités en Suisse
+  __commitless: boolean;  // sans engagement
+  __dataCH: number;       // Go (-1 = illimité)
+  __roamGB: number;       // données roaming (-1 = illimité)
+  __roamMin: number;      // minutes roaming (-1 = illimité)
+  __countries: string[];  // tokens bruts (roaming_zone_incluse)
+  __countriesExpanded: string[]; // Europe -> liste, etc.
+  __network: string;      // Sunrise / Salt / Swisscom
+  __techTag: string;      // 4G, 5G, Fibre, Câble, 5G Box, ...
+  __url?: string;
+  __raw: RawRow;
+}
+
+// =========================
+// Utils
+// =========================
+
+const clamp = (n: number, a: number, b: number) => Math.min(Math.max(n, a), b);
+
+function asNum(v: any): number {
+  if (v === '' || v === undefined || v === null) return NaN;
+  const n = Number(String(v).replace(",","."));
+  return Number.isFinite(n) ? n : NaN;
+}
+
+// Friendly formatters
+function fmtDataGB(v?: number) { if (v === undefined || v === null || Number.isNaN(v)) return "-"; if (v === -1 || v === Number.POSITIVE_INFINITY) return "Illimité"; if (v >= 1000) return (v/1000).toFixed(1)+" To"; return v+" Go"; }
+function fmtMin(v?: number) { if (v === undefined || v === null || Number.isNaN(v)) return "-"; if (v === -1 || v === Number.POSITIVE_INFINITY) return "Illimités"; if (v === 0) return "—"; return v+" min"; }
+
+// =========================
+// CSV parser (sécurisé quotes)
+// =========================
+
+function splitCSVLine(line: string): string[] {
+  const out: string[] = []; let cur = ""; let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { if (q && line[i + 1] === '"') { cur += '"'; i++; } else { q = !q; } }
+    else if (ch === "," && !q) { out.push(cur); cur = ""; }
+    else { cur += ch; }
+  }
+  out.push(cur);
+  return out.map((s) => s.trim());
+}
+
+function parseCSV(text: string): RawRow[] {
+  const lines = text.replace(/\r\n?|\n/g, "\n").split("\n");
+  if (!lines.length) return [];
+  const header = splitCSVLine(lines[0]);
+  const rows: RawRow[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const L = lines[i]; if (!L.trim()) continue;
+    const cols = splitCSVLine(L); const obj: RawRow = {};
+    header.forEach((h, idx) => (obj[h] = cols[idx] ?? "")); rows.push(obj);
+  }
+  return rows;
+}
+
+// =========================
+// Pays & zones
+// =========================
+
+const EUROPE = [
+  "Albanie","Allemagne","Andorre","Autriche","Belgique","Bosnie-Herzégovine","Bulgarie","Chypre","Croatie","Danemark","Espagne","Estonie","Finlande","France","Grèce","Hongrie","Irlande","Islande","Italie","Kosovo","Lettonie","Liechtenstein","Lituanie","Luxembourg","Malte","Monaco","Monténégro","Norvège","Pays-Bas","Pologne","Portugal","République tchèque","Roumanie","Royaume-Uni","Saint-Marin","Serbie","Slovaquie","Slovénie","Suède","Suisse","Vatican"
+];
+const BALKANS = ["Albanie","Bosnie-Herzégovine","Kosovo","Monténégro","Macédoine du Nord","Serbie"];
+const PAYS_VOISINS_CH = ["France","Allemagne","Italie","Autriche","Liechtenstein"];
+
+const ALIASES: Record<string, string> = {
+  DE: "Allemagne", GER: "Allemagne", Germany: "Allemagne",
+  FR: "France", FRANCE: "France",
+  IT: "Italie", ITA: "Italie",
+  AT: "Autriche", AUT: "Autriche",
+  LI: "Liechtenstein",
+  UK: "Royaume-Uni", GB: "Royaume-Uni",
+  EU: "Europe", UE: "Europe", "EU/UK": "Europe", Europe: "Europe",
+  "Pays voisins": "Pays voisins", Balkans: "Balkans",
+  US: "USA", USA: "USA", CAN: "Canada",
+  Turquie: "Turquie", "EU élargie + 49 pays": "Europe",
+};
+
+function capitalize(s: string) {
+  return s.toLowerCase().split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+function tokenizeCountries(raw: string): string[] {
+  if (!raw) return [];
+  let txt = raw.replace(/\(|\)/g, " ")
+    .replace(/\bUE\/UK\b/gi, "Europe")
+    .replace(/\bEU\/UK\b/gi, "Europe")
+    .replace(/\bEU\b/gi, "Europe");
+  const parts = txt.split(/\+|,|;|\||\//g).map(s => s.trim()).filter(Boolean);
+  const out: string[] = [];
+  for (const p of parts) {
+    const clean = p.replace(/\s{2,}/g, " ").replace(/\.$/, "");
+    if (/^(aucune|aucun|none|0)$/i.test(clean)) continue;
+    const canon = ALIASES[clean] || ALIASES[clean.replace(/\s/g, "")] || capitalize(clean);
+    if (canon) out.push(canon);
+  }
+  return Array.from(new Set(out));
+}
+
+function expandCountries(tokens: string[]): string[] {
+  const set = new Set<string>();
+  for (const t of tokens) {
+    if (t === "Europe") EUROPE.forEach((c) => set.add(c));
+    else if (t === "Balkans") BALKANS.forEach((c) => set.add(c));
+    else if (t === "Pays voisins") PAYS_VOISINS_CH.forEach((c) => set.add(c));
+    else if (t) set.add(t);
+  }
+  return Array.from(set);
+}
+
+function matchCountries(selected: string[], row: Row): boolean {
+  if (!selected.length) return true;
+  if (!row.__countries.length && !row.__countriesExpanded.length) return false;
+  const rset = new Set(row.__countriesExpanded);
+  return selected.some((p) => rset.has(p));
+}
+
+// =========================
+// Mapping vers Row depuis CSV
+// =========================
+
+function detectType(raw: RawRow): Category {
+  const t = (raw["type_principal"] || "").toLowerCase();
+  if (/prepaid|prépay/i.test(t)) return "prepaid";
+  if (/internet|home|box|bundle|tv/.test(t)) return "box"; // Bundles = Internet & TV
+  return "mobile";
+}
+
+function techFromRow(raw: RawRow, cat: Category, speed: number): string {
+  const techHome = String(raw["home_technologie"] || "").trim();
+  if (cat === "box") {
+    if (/fibre/i.test(techHome)) return "Fibre";
+    if (/c(â|a)ble/i.test(techHome)) return "Câble";
+    if (/5g/i.test(techHome)) return "5G Box";
+    if (/ott/i.test(techHome)) return "OTT";
+    if (/fibre\/c(â|a)ble/i.test(techHome)) return "Fibre/Câble";
+    return techHome || "Internet fixe";
+  }
+  // Mobile / Prepaid ➜ heuristique sur vitesse
+  if (Number.isFinite(speed) && speed >= 1000) return "5G";
+  return "4G";
+}
+
+function shapeRow(raw: RawRow, idx: number): Row {
+  const priceNow = asNum(raw["prix_mensuel_chf"]);
+  const priceStd = asNum(raw["prix_standard_chf"]);
+  const priceOld = Number.isFinite(priceStd) && Number.isFinite(priceNow) && priceNow < priceStd ? priceStd : NaN;
+  let discountPct = asNum(raw["rabais_pourcentage"]);
+  if (!Number.isFinite(discountPct) && Number.isFinite(priceOld)) {
+    discountPct = Math.round(((priceOld - Number(priceNow)) / priceOld) * 100);
+  }
+  if (!(Number.isFinite(discountPct) && discountPct! > 0)) discountPct = NaN;
+
+  const speed = asNum(raw["vitesse_dl_max_mbps"]);
+  const appelsCH = asNum(raw["appels_suisse_min"]); // -1 => illimité
+  const smsCH = String(raw["sms_mms_suisse"] || "");
+  const unlimitedCH = (appelsCH === -1) && !/payant/i.test(smsCH || "");
+  const dataCH = asNum(raw["donnees_suisse_go"]);
+
+  const tv = asNum(raw["tv_chaines_incluses"]) > 0 || /bundle|tv/i.test(String(raw["type_principal"])) || /tv/i.test(String(raw["nom_offre_original"])) ;
+  const commitless = asNum(raw["duree_engagement_mois"]) === 0;
+
+  const roamGB = asNum(raw["roaming_donnees_go"]);
+  const roamMin = asNum(raw["roaming_appels_min"]);
+
+  const zones = tokenizeCountries(String(raw["roaming_zone_incluse"] || ""));
+  const expanded = expandCountries(zones);
+
+  const promoTemp = (asNum(raw["duree_promo_mois"]) > 0) || (!!String(raw["date_expiration_promo"] || "").trim() && !/permanente/i.test(String(raw["date_expiration_promo"])));
+  const promoUntil = String(raw["date_expiration_promo"] || "").trim();
+
+  const cat = detectType(raw);
+  const net = String(raw["reseau_utilise"] || "").trim();
+  const techTag = techFromRow(raw, cat, speed);
+
+  return {
+    __id: String(raw["id_offre"] || `AUTO-${idx}`),
+    __op: String(raw["operateur"] || "").trim(),
+    __name: String(raw["nom_offre_original"] || raw["nom_offre"] || "").trim(),
+    __price: priceNow,
+    __priceOld: priceOld,
+    __discountPct: discountPct,
+    __promoTemp: promoTemp,
+    __promoUntil: promoUntil,
+    __speed: speed,
+    __type: cat,
+    __tv: tv,
+    __unlimitedCH: unlimitedCH,
+    __commitless: commitless,
+    __dataCH: dataCH,
+    __roamGB: roamGB,
+    __roamMin: roamMin,
+    __countries: zones,
+    __countriesExpanded: expanded,
+    __network: net,
+    __techTag: techTag,
+    __url: String(raw["url_offre"] || ""),
+    __raw: raw,
+  };
+}
+
+// =========================
+// UI primitives (style unifié)
+// =========================
+
+function useFileDrop(onText: (t: string) => void) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const onOver = (e: DragEvent) => { e.preventDefault(); (el as any).classList.add("is-over"); };
+    const onLeave = (e: DragEvent) => { e.preventDefault(); (el as any).classList.remove("is-over"); };
+    const onDrop = (e: DragEvent) => {
+      e.preventDefault(); (el as any).classList.remove("is-over");
+      const f = (e as any).dataTransfer?.files?.[0]; if (!f) return;
+      const r = new FileReader(); r.onload = () => onText(String(r.result || "")); r.readAsText(f);
+    };
+    (el as any).addEventListener("dragover", onOver as any);
+    (el as any).addEventListener("dragleave", onLeave as any);
+    (el as any).addEventListener("drop", onDrop as any);
+    return () => {
+      (el as any).removeEventListener("dragover", onOver as any);
+      (el as any).removeEventListener("dragleave", onLeave as any);
+      (el as any).removeEventListener("drop", onDrop as any);
+    };
+  }, [onText]);
+  return ref;
+}
+
+const Pill: React.FC<{ on?: boolean; onClick?: () => void; children: React.ReactNode; ariaLabel?: string; }>
+= ({ on, onClick, children, ariaLabel }) => (
+  <button type="button" className={`pill ${on ? "on" : ""}`} aria-pressed={!!on} onClick={onClick} aria-label={ariaLabel}>{children}</button>
+);
+
+const Chip: React.FC<{ selected?: boolean; onClick?: () => void; children: React.ReactNode; size?: "sm" | "md"; }>
+= ({ selected, onClick, children, size = "md" }) => (
+  <button type="button" className={`chip ${selected ? "on" : ""} ${size}`} onClick={onClick}>{children}</button>
+);
+
+const Toggle: React.FC<{ checked: boolean; onChange: (v: boolean) => void; label?: string; }>
+= ({ checked, onChange, label }) => (
+  <label className="toggle">
+    <input type="checkbox" checked={checked} onChange={(e) => onChange((e.target as HTMLInputElement).checked)} />
+    <span className="track" />
+    {label && <span className="tlabel">{label}</span>}
+  </label>
+);
+
+// Double Range modernisé (track rempli + bulles)
+const DualRange: React.FC<{ min: number; max: number; step?: number; values: [number, number]; onChange: (v: [number, number]) => void; label?: string; suffix?: string; minGap?: number; }>
+= ({ min, max, step = 1, values, onChange, label, suffix = "", minGap = 0 }) => {
+  const [a, b] = values;
+  const pctA = ((a - min) / (max - min)) * 100; const pctB = ((b - min) / (max - min)) * 100;
+  const left = Math.min(pctA, pctB); const width = Math.abs(pctB - pctA);
+  const slideOne = (v: number) => { const nv = Math.min(v, values[1] - minGap); onChange([clamp(nv, min, max), values[1]]); };
+  const slideTwo = (v: number) => { const nv = Math.max(v, values[0] + minGap); onChange([values[0], clamp(nv, min, max)]); };
+  return (
+    <div className="dr">
+      {label && (<div className="dr__header"><span className="label">{label}</span><span className="val">{a.toFixed(2)}{suffix} — {b.toFixed(2)}{suffix}</span></div>)}
+      <div className="dr__wrap">
+        <div className="dr__track" />
+        <div className="dr__range" style={{ left: `${left}%`, width: `${width}%` }} />
+        <div className="dr__bubble" style={{ left: `calc(${pctA}% - 18px)` }}>{a.toFixed(0)}{suffix}</div>
+        <div className="dr__bubble" style={{ left: `calc(${pctB}% - 18px)` }}>{b.toFixed(0)}{suffix}</div>
+        <input type="range" min={min} max={max} step={step} value={a} aria-label={`${label} min`} id="slider-1" onInput={(e) => slideOne(parseFloat((e.target as HTMLInputElement).value))} onChange={(e) => slideOne(parseFloat((e.target as HTMLInputElement).value))} />
+        <input type="range" min={min} max={max} step={step} value={b} aria-label={`${label} max`} id="slider-2" onInput={(e) => slideTwo(parseFloat((e.target as HTMLInputElement).value))} onChange={(e) => slideTwo(parseFloat((e.target as HTMLInputElement).value))} />
+      </div>
     </div>
-    <div class="footer">
-        &copy; 2025 EXODE SUPRÊME - Version prototype local. Tous droits réservés.
+  );
+};
+
+// Sélecteur multi pays
+const CountrySelect: React.FC<{ options: string[]; selected: string[]; onChange: (v: string[]) => void; }>
+= ({ options, selected, onChange }) => {
+  const [q, setQ] = useState("");
+  const visible = useMemo(() => {
+    const QQ = q.trim().toLowerCase();
+    return QQ ? options.filter(o => o.toLowerCase().includes(QQ)) : options;
+    }, [q, options]);
+  const toggle = (v: string) => onChange(selected.includes(v) ? selected.filter(x => x !== v) : [...selected, v]);
+  return (
+    <div className="csel">
+      <div className="csel__tools">
+        <input className="input" placeholder="Rechercher un pays…" value={q} onChange={(e) => setQ((e.target as HTMLInputElement).value)} />
+        <div className="row g1" style={{marginTop:10}}>
+          <button className="btn sm" onClick={() => onChange(options)}>Tout</button>
+          <button className="btn sm" onClick={() => onChange([])}>Aucun</button>
+        </div>
+      </div>
+      <div className="csel__list" role="listbox" aria-multiselectable>
+        {visible.map((p) => (
+          <Chip key={p} selected={selected.includes(p)} onClick={() => toggle(p)} size="sm">{p}</Chip>
+        ))}
+      </div>
     </div>
-</body>
-</html>
+  );
+};
+
+// =========================
+// Composant principal
+// =========================
+
+export default function InfinityComparatorV10() {
+  useEffect(() => { document.title = "Infinity Comparator — Données à jour"; }, []);
+  // Effet gravity-space
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const x = e.clientX / window.innerWidth; const y = e.clientY / window.innerHeight;
+      document.documentElement.style.setProperty('--mx', String(x));
+      document.documentElement.style.setProperty('--my', String(y));
+    };
+    window.addEventListener('mousemove', onMove);
+    return () => window.removeEventListener('mousemove', onMove);
+  }, []);
+
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  useEffect(() => { document.documentElement.setAttribute('data-theme', theme); }, [theme]);
+
+  const [rows, setRows] = useState<Row[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const dropRef = useFileDrop((t) => importCSV(t));
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteVal, setPasteVal] = useState("");
+
+  function importCSV(text: string) {
+    try {
+      const raw = parseCSV(text);
+      const shaped = raw.map(shapeRow);
+      setRows(shaped); setErr(null);
+      const ops = Array.from(new Set(shaped.map(r => r.__op).filter(Boolean))).sort();
+      setOpSel(ops);
+      const nets = Array.from(new Set(shaped.map(r => r.__network).filter(Boolean))).sort();
+      setNetworkSel(nets);
+      const allCountries = Array.from(new Set(shaped.flatMap(r => r.__countriesExpanded))).sort();
+      setCountryOptions(allCountries); setCountriesSel(allCountries);
+      const allTech = Array.from(new Set(shaped.map(r => r.__techTag).filter(Boolean))).sort();
+      setTechSel(allTech);
+    } catch (e: any) { setErr(e.message || String(e)); }
+  }
+
+  // Filtres généraux
+  const [category, setCategory] = useState<Category>("mobile");
+  const [opSel, setOpSel] = useState<string[]>([]);
+  const [networkSel, setNetworkSel] = useState<string[]>([]);
+  const [techSel, setTechSel] = useState<string[]>([]);
+  const [budget, setBudget] = useState<[number, number]>([0, 150]);
+  const [speedRange, setSpeedRange] = useState<[number, number]>([0, 10000]);
+  const [onlyUnlimitedCH, setOnlyUnlimitedCH] = useState(false);
+  const [internetIllimCH, setInternetIllimCH] = useState(false);
+  const [commitlessOnly, setCommitlessOnly] = useState(false);
+
+  // Roaming (section auto-ouverte si activée)
+  const [roamOn, setRoamOn] = useState<boolean>(false);
+  const [countryOptions, setCountryOptions] = useState<string[]>([]);
+  const [countriesSel, setCountriesSel] = useState<string[]>([]);
+  type RoamDataMode = "any" | "min" | "unlimited";
+  const [roamDataMode, setRoamDataMode] = useState<RoamDataMode>("any");
+  const [roamGBMin, setRoamGBMin] = useState<number>(1);
+  const [wantRoamCalls, setWantRoamCalls] = useState<boolean>(false);
+
+  // Tri & vue
+  const [sortKey, setSortKey] = useState<"price" | "speed">("price");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [view, setView] = useState<"cards" | "table">("cards");
+  const [openDetails, setOpenDetails] = useState<Record<string, boolean>>({});
+
+  // Options
+  const opOptions = useMemo(() => Array.from(new Set(rows.map(r => r.__op).filter(Boolean))).sort(), [rows]);
+  const networkOptions = useMemo(() => Array.from(new Set(rows.map(r => r.__network).filter(Boolean))).sort(), [rows]);
+  const techOptions = useMemo(() => Array.from(new Set(rows.map(r => r.__techTag).filter(Boolean))).sort(), [rows]);
+
+  const filtered = useMemo(() => {
+    let list = rows.slice();
+
+    if (category !== "all") list = list.filter(r => r.__type === category);
+    if (opSel.length) list = list.filter(r => opSel.includes(r.__op));
+    if (networkSel.length) list = list.filter(r => networkSel.includes(r.__network));
+    if (techSel.length) list = list.filter(r => techSel.includes(r.__techTag));
+
+    // Budget
+    list = list.filter(r => Number.isFinite(r.__price) && r.__price >= budget[0] && r.__price <= budget[1]);
+
+    // Vitesse (plage)
+    list = list.filter(r => {
+      const sp = r.__speed;
+      if (!Number.isFinite(sp)) return speedRange[0] === 0 && speedRange[1] === 10000;
+      return sp >= speedRange[0] && sp <= speedRange[1];
+    });
+
+    if (onlyUnlimitedCH) list = list.filter(r => r.__unlimitedCH);
+    if (internetIllimCH) list = list.filter(r => r.__dataCH === -1 || r.__dataCH === Number.POSITIVE_INFINITY);
+    if (commitlessOnly) list = list.filter(r => r.__commitless);
+
+    if (roamOn) {
+      list = list.filter(r => matchCountries(countriesSel, r));
+      if (roamDataMode === "unlimited") {
+        list = list.filter(r => r.__roamGB === -1 || r.__roamGB === Number.POSITIVE_INFINITY);
+      } else if (roamDataMode === "min") {
+        list = list.filter(r => (r.__roamGB === -1 || r.__roamGB === Number.POSITIVE_INFINITY) || (Number.isFinite(r.__roamGB) && r.__roamGB >= roamGBMin));
+      }
+      if (wantRoamCalls) {
+        list = list.filter(r => (r.__roamMin === -1 || r.__roamMin === Number.POSITIVE_INFINITY) || (Number.isFinite(r.__roamMin) && r.__roamMin > 0));
+      }
+    }
+
+    // Tri
+    list.sort((a, b) => {
+      const ka = sortKey === "price" ? a.__price : a.__speed;
+      const kb = sortKey === "price" ? b.__price : b.__speed;
+      const dir = sortDir === "asc" ? 1 : -1;
+      if (Number.isNaN(ka) && Number.isNaN(kb)) return 0;
+      if (Number.isNaN(ka)) return 1;
+      if (Number.isNaN(kb)) return -1;
+      return ka === kb ? 0 : ka > kb ? dir : -dir;
+    });
+
+    return list;
+  }, [rows, category, opSel, networkSel, techSel, budget, speedRange, onlyUnlimitedCH, internetIllimCH, commitlessOnly, roamOn, countriesSel, roamDataMode, roamGBMin, wantRoamCalls, sortKey, sortDir]);
+
+  function resetAll() {
+    setCategory("mobile");
+    setOpSel(opOptions);
+    setNetworkSel(networkOptions);
+    setTechSel(techOptions);
+    setBudget([0, 150]);
+    setSpeedRange([0, 10000]);
+    setOnlyUnlimitedCH(false);
+    setInternetIllimCH(false);
+    setCommitlessOnly(false);
+    setRoamOn(false);
+    setCountriesSel(countryOptions);
+    setRoamDataMode("any");
+    setRoamGBMin(1);
+    setWantRoamCalls(false);
+    setSortKey("price"); setSortDir("asc"); setView("cards");
+  }
+
+  // ========================= Rendu
+  return (
+    <div className="page">
+      <style>{CSS}</style>
+
+      <header className="hdr" aria-label="En-tête">
+        <div className="brand" aria-label="INFINITY BUSINESS"><span className="brand__inner">INFINITY BUSINESS</span></div>
+        <div className="hdr__right">
+          <div className="seg" role="group" aria-label="Thème">
+            <button className={`seg__btn ${theme === 'dark' ? 'on' : ''}`} onClick={() => setTheme('dark')} aria-pressed={theme === 'dark'}>Sombre</button>
+            <button className={`seg__btn ${theme === 'light' ? 'on' : ''}`} onClick={() => setTheme('light')} aria-pressed={theme === 'light'}>Clair</button>
+          </div>
+          <button className="btn" onClick={resetAll}>Réinitialiser</button>
+          <div className="seg" role="group" aria-label="Mode d'affichage">
+            <button className={`seg__btn ${view === "cards" ? "on" : ""}`} onClick={() => setView("cards")} aria-pressed={view === "cards"}>Grille</button>
+            <button className={`seg__btn ${view === "table" ? "on" : ""}`} onClick={() => setView("table")} aria-pressed={view === "table"}>Liste</button>
+          </div>
+        </div>
+      </header>
+
+      <main className="layout">
+        {/* Filtres */}
+        <aside className="filters" aria-label="Filtres">
+          {/* Données */}
+          <section className="panel">
+            <h2 className="panel__title">Données</h2>
+            <div ref={dropRef} className="drop" aria-label="Déposez un CSV ici">
+              <div>
+                <strong>Ajouter CSV</strong>
+                <div className="muted">Glisser-déposer ou <label className="link"><input type="file" accept=".csv,.txt" onChange={(e) => {
+                  const f = (e.target as HTMLInputElement).files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => importCSV(String(r.result || "")); r.readAsText(f);
+                }} />choisir un fichier</label>.</div>
+                <div className="muted">ou <button className="btn sm" onClick={() => setPasteOpen(v => !v)} aria-expanded={pasteOpen}>coller brut</button></div>
+              </div>
+            </div>
+            {pasteOpen && (
+              <div className="paste">
+                <textarea value={pasteVal} onChange={(e) => setPasteVal((e.target as HTMLTextAreaElement).value)} placeholder="Collez votre CSV ici…" />
+                <div className="row r-end"><button className="btn" onClick={() => importCSV(pasteVal)}>Importer</button></div>
+              </div>
+            )}
+            {err && <div className="err" role="alert">{err}</div>}
+          </section>
+
+          {/* Type d'offre */}
+          <section className="panel">
+            <h2 className="panel__title">Type d'offre</h2>
+            <div className="row g1 wrap">
+              {(["all","mobile","prepaid","box"] as Category[]).map((c) => (
+                <Pill key={c} on={category === c} onClick={() => setCategory(c)}>
+                  {c === "all" ? "Tous" : c === "mobile" ? "Mobile" : c === "prepaid" ? "Prépayé" : "Internet & TV"}
+                </Pill>
+              ))}
+            </div>
+          </section>
+
+          {/* Opérateurs préférés */}
+          <section className="panel">
+            <h2 className="panel__title">Opérateurs préférés</h2>
+            <div className="row g1 op-actions" style={{marginBottom:10}}>
+              <button className="btn sm" onClick={() => setOpSel(opOptions)}>Tout</button>
+              <button className="btn sm" onClick={() => setOpSel([])}>Aucun</button>
+            </div>
+            <div className="wrap g1">
+              {opOptions.map((op) => (
+                <Chip key={op} selected={opSel.includes(op)} onClick={() => setOpSel(opSel.includes(op) ? opSel.filter(x => x !== op) : [...opSel, op])}>{op}</Chip>
+              ))}
+            </div>
+          </section>
+
+          {/* Réseau utilisé */}
+          <section className="panel">
+            <h2 className="panel__title">Réseau utilisé</h2>
+            <div className="row g1" style={{marginBottom:10}}>
+              <button className="btn sm" onClick={() => setNetworkSel(networkOptions)}>Tout</button>
+              <button className="btn sm" onClick={() => setNetworkSel([])}>Aucun</button>
+            </div>
+            <div className="wrap g1">
+              {networkOptions.map((n) => (
+                <Chip key={n} selected={networkSel.includes(n)} onClick={() => setNetworkSel(networkSel.includes(n) ? networkSel.filter(x => x !== n) : [...networkSel, n])}>{n || '—'}</Chip>
+              ))}
+            </div>
+          </section>
+
+          {/* Tech */}
+          <section className="panel">
+            <h2 className="panel__title">Tech (4G / 5G / Fixe)</h2>
+            <div className="row g1" style={{marginBottom:10}}>
+              <button className="btn sm" onClick={() => setTechSel(techOptions)}>Tout</button>
+              <button className="btn sm" onClick={() => setTechSel([])}>Aucun</button>
+            </div>
+            <div className="wrap g1">
+              {techOptions.map((t) => (
+                <Chip key={t} selected={techSel.includes(t)} onClick={() => setTechSel(techSel.includes(t) ? techSel.filter(x => x !== t) : [...techSel, t])}>{t}</Chip>
+              ))}
+            </div>
+          </section>
+
+          {/* Budget + Vitesse (alignés) */}
+          <section className="panel twocol">
+            <div>
+              <DualRange min={0} max={150} step={0.5} minGap={1} values={budget} onChange={setBudget} label="Budget (CHF/mois)" suffix=" CHF" />
+            </div>
+            <div>
+              <DualRange min={0} max={10000} step={50} minGap={50} values={speedRange} onChange={setSpeedRange} label="Vitesse de connexion (Suisse)" suffix=" Mbps" />
+            </div>
+          </section>
+
+          {/* Filtres */}
+          <section className="panel">
+            <h2 className="panel__title">Filtres</h2>
+            <div className="row g2 a-center">
+              <Toggle checked={internetIllimCH} onChange={setInternetIllimCH} label="Internet illimité (Suisse)" />
+              <Toggle checked={onlyUnlimitedCH} onChange={setOnlyUnlimitedCH} label="Appels & SMS illimités (CH)" />
+              <Toggle checked={commitlessOnly} onChange={setCommitlessOnly} label="Sans engagement" />
+            </div>
+          </section>
+
+          {/* À l'étranger : pas d'encoche, section visible si activé */}
+          <section className="panel">
+            <div className="row j-between a-center">
+              <h2 className="panel__title">À l'étranger (roaming)</h2>
+              <Toggle checked={roamOn} onChange={setRoamOn} />
+            </div>
+            {roamOn && (
+              <div className="acc__body">
+                <h3 className="subttl">Pays / zones</h3>
+                <div className="row g1 wrap" style={{marginBottom:8}}>
+                  {/* Presets rapides */}
+                  <Chip size="sm" onClick={() => setCountriesSel(["Europe"]) } selected={false}>Europe</Chip>
+                  <Chip size="sm" onClick={() => setCountriesSel(["Pays voisins"]) } selected={false}>Pays voisins</Chip>
+                  <Chip size="sm" onClick={() => setCountriesSel(["Balkans"]) } selected={false}>Balkans</Chip>
+                </div>
+                <CountrySelect options={countryOptions} selected={countriesSel} onChange={setCountriesSel} />
+
+                <h3 className="subttl">Internet (roaming)</h3>
+                <div className="row g1 wrap">
+                  <Pill on={roamDataMode === "any"} onClick={() => setRoamDataMode("any")}>Peu importe</Pill>
+                  <Pill on={roamDataMode === "min"} onClick={() => setRoamDataMode("min")}>≥ X Go</Pill>
+                  <Pill on={roamDataMode === "unlimited"} onClick={() => setRoamDataMode("unlimited")}>Illimité seulement</Pill>
+                </div>
+                {roamDataMode === "min" && (
+                  <div className="padT8">
+                    <DualRange min={0} max={20} step={0.5} minGap={0.5 as any} values={[0, roamGBMin]} onChange={(v) => setRoamGBMin(v[1])} label="Seuil données à l'étranger" suffix=" Go" />
+                  </div>
+                )}
+
+                <h3 className="subttl">Appels/SMS (roaming)</h3>
+                <Toggle checked={wantRoamCalls} onChange={setWantRoamCalls} label="Inclut appels/SMS à l'étranger" />
+              </div>
+            )}
+          </section>
+
+          {/* Tri */}
+          <section className="panel">
+            <h2 className="panel__title">Tri</h2>
+            <div className="row g1">
+              <Pill on={sortKey === "price"} onClick={() => setSortKey("price")}>Prix</Pill>
+              <Pill on={sortKey === "speed"} onClick={() => setSortKey("speed")}>Vitesse</Pill>
+              <Pill on={sortDir === "asc"} onClick={() => setSortDir("asc")}>↑</Pill>
+              <Pill on={sortDir === "desc"} onClick={() => setSortDir("desc")}>↓</Pill>
+            </div>
+          </section>
+        </aside>
+
+        {/* Résultats */}
+        <section className="results">
+          <div className="summary">
+            <div className="title">Offres</div>
+            <div className="muted">{filtered.length} résultat(s) — {rows.length} importé(s)</div>
+          </div>
+
+          {view === "cards" ? (
+            <div className="grid">
+              {filtered.map((r) => {
+                const hasRoam = (r.__roamGB === -1 || r.__roamGB > 0) || (r.__roamMin === -1 || r.__roamMin > 0) || (r.__countries && r.__countries.length);
+                return (
+                <article key={r.__id} className="card" tabIndex={0} aria-label={`${r.__op} ${r.__name}`}>
+                  <div className="card__head">
+                    <div className="head__left">
+                      <span className="op bigbold">{r.__op}</span>
+                      <span className="offername"> — {r.__name}</span>
+                    </div>
+                    <div className="priceblock">
+                      {Number.isFinite(r.__priceOld) && Number(r.__priceOld) > Number(r.__price) ? (
+                        <>
+                          <span className="oldprice">{Number(r.__priceOld).toFixed(2)} CHF/mois</span>
+                          <span className="newprice"><span className="big">{Number(r.__price).toFixed(2)}</span> <span className="unit">CHF/mois</span></span>
+                          {Number.isFinite(r.__discountPct) && <span className="discount chip sm on">-{Number(r.__discountPct).toFixed(0)}%</span>}
+                          {r.__promoTemp && <span className="promoTag">Temporaire{r.__promoUntil ? <> jusqu’au {r.__promoUntil}</> : null}</span>}
+                        </>
+                      ) : (
+                        <span className="newprice"><span className="big">{Number.isFinite(r.__price) ? Number(r.__price).toFixed(2) : "-"}</span> <span className="unit">CHF/mois</span></span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Suisse */}
+                  <div className="specgroup">
+                    <div className="subttl small">Suisse</div>
+                    <div className="specs">
+                      <div className="spec"><span>Appels en Suisse</span><b>{fmtMin(asNum(r.__raw["appels_suisse_min"]))}</b></div>
+                      <div className="spec"><span>SMS/MMS en Suisse</span><b>{String(r.__raw["sms_mms_suisse"] || "-")}</b></div>
+                      <div className="spec"><span>Internet en Suisse</span><b>{fmtDataGB(r.__dataCH)}</b></div>
+                      <div className="spec"><span>Tech / Réseau</span><b>{r.__techTag} — {r.__network || '—'}</b></div>
+                    </div>
+                  </div>
+
+                  {/* À l'étranger */}
+                  {hasRoam && (
+                    <div className="specgroup">
+                      <div className="subttl small">À l'étranger</div>
+                      <div className="specs">
+                        <div className="spec"><span>Appels à l'étranger</span><b>{fmtMin(r.__roamMin)}</b></div>
+                        <div className="spec"><span>Internet à l'étranger</span><b>{fmtDataGB(r.__roamGB)}</b></div>
+                        <div className="spec"><span>Zone d’itinérance</span><b className="nowrap">{r.__countries.length ? r.__countries.join(", ") : "-"}</b></div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="row r-end g1">
+                    {r.__url && <a className="chip on cta" href={r.__url} target="_blank" rel="noopener noreferrer" role="link">Voir l’offre</a>}
+                    <button className="chip cta" onClick={() => setOpenDetails({ ...openDetails, [r.__id]: !openDetails[r.__id] })} aria-expanded={!!openDetails[r.__id]}>Détails</button>
+                  </div>
+                  {openDetails[r.__id] && (
+                    <div className="details">
+                      {r.__type !== 'box' ? (
+                        <div className="details__grid">
+                          <div className="detail"><span>Type</span><b>{r.__type === 'mobile' ? 'Mobile' : r.__type === 'prepaid' ? 'Prépayé' : 'Internet & TV'}</b></div>
+                          <div className="detail"><span>Vitesse max</span><b>{Number.isFinite(r.__speed) ? `${r.__speed} Mbps` : '—'}</b></div>
+                          <div className="detail"><span>Données CH</span><b>{fmtDataGB(r.__dataCH)}</b></div>
+                          <div className="detail"><span>Appels CH</span><b>{fmtMin(asNum(r.__raw['appels_suisse_min']))}</b></div>
+                          <div className="detail"><span>SMS/MMS CH</span><b>{String(r.__raw['sms_mms_suisse'] || '-')}</b></div>
+                          <div className="detail"><span>Roaming data</span><b>{fmtDataGB(r.__roamGB)}</b></div>
+                          <div className="detail"><span>Roaming appels</span><b>{fmtMin(r.__roamMin)}</b></div>
+                          <div className="detail"><span>Zones</span><b>{r.__countries.length ? r.__countries.join(', ') : '—'}</b></div>
+                          <div className="detail"><span>Réseau</span><b>{r.__network || '—'}</b></div>
+                          <div className="detail"><span>Engagement</span><b>{Number.isFinite(asNum(r.__raw['duree_engagement_mois'])) ? `${asNum(r.__raw['duree_engagement_mois'])} mois` : (r.__commitless ? 'Sans engagement' : '—')}</b></div>
+                          <div className="detail"><span>eSIM</span><b>{String(r.__raw['option_esim'] || '—')}</b></div>
+                          <div className="detail"><span>Portabilité</span><b>{String(r.__raw['portabilite_numero_incluse'] || '—')}</b></div>
+                          <div className="detail"><span>Frais activation</span><b>{Number.isFinite(asNum(r.__raw['frais_activation_chf'])) ? `${asNum(r.__raw['frais_activation_chf']).toFixed(2)} CHF` : '—'}</b></div>
+                        </div>
+                      ) : (
+                        <div className="details__grid">
+                          <div className="detail"><span>Type</span><b>Internet & TV</b></div>
+                          <div className="detail"><span>Technologie</span><b>{String(r.__raw['home_technologie'] || r.__techTag || '—')}</b></div>
+                          <div className="detail"><span>Vitesse DL</span><b>{Number.isFinite(r.__speed) ? `${r.__speed} Mbps` : '—'}</b></div>
+                          <div className="detail"><span>Vitesse UL</span><b>{Number.isFinite(asNum(r.__raw['vitesse_ul_max_mbps'])) ? `${asNum(r.__raw['vitesse_ul_max_mbps'])} Mbps` : '—'}</b></div>
+                          <div className="detail"><span>TV chaînes</span><b>{Number.isFinite(asNum(r.__raw['tv_chaines_incluses'])) ? `${asNum(r.__raw['tv_chaines_incluses'])}` : '—'}</b></div>
+                          <div className="detail"><span>TV replay</span><b>{Number.isFinite(asNum(r.__raw['tv_replay_jours'])) ? `${asNum(r.__raw['tv_replay_jours'])} j` : '—'}</b></div>
+                          <div className="detail"><span>TV enregistrement</span><b>{Number.isFinite(asNum(r.__raw['tv_enregistrement_heures'])) ? `${asNum(r.__raw['tv_enregistrement_heures'])} h` : '—'}</b></div>
+                          <div className="detail"><span>Qualité TV</span><b>{String(r.__raw['tv_qualite_max'] || '—')}</b></div>
+                          <div className="detail"><span>Engagement</span><b>{Number.isFinite(asNum(r.__raw['duree_engagement_mois'])) ? `${asNum(r.__raw['duree_engagement_mois'])} mois` : (r.__commitless ? 'Sans engagement' : '—')}</b></div>
+                          <div className="detail"><span>Frais activation</span><b>{Number.isFinite(asNum(r.__raw['frais_activation_chf'])) ? `${asNum(r.__raw['frais_activation_chf']).toFixed(2)} CHF` : '—'}</b></div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </article>
+              );})}
+            </div>
+          ) : (
+            <div className="tablewrap">
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th>Opérateur</th><th>Offre</th><th>Type</th><th>Prix</th><th>Vitesse</th><th>Réseau</th><th>Tech</th><th>Illimité CH</th><th>Sans engagement</th><th>Internet CH</th><th>Appels CH</th><th>Roaming data</th><th>Roaming appels</th><th>Zone</th><th>Voir</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((r) => (
+                    <tr key={r.__id}>
+                      <td>{r.__op}</td>
+                      <td>{r.__name}</td>
+                      <td>{r.__type === "mobile" ? "Mobile" : r.__type === "prepaid" ? "Prépayé" : "Internet & TV"}</td>
+                      <td>{Number.isFinite(r.__price) ? r.__price.toFixed(2) : "-"}{Number.isFinite(r.__priceOld) && r.__priceOld! > r.__price ? <> <span className="oldprice">{r.__priceOld?.toFixed(2)}</span></> : null}</td>
+                      <td>{Number.isFinite(r.__speed) ? r.__speed : "-"}</td>
+                      <td>{r.__network || '—'}</td>
+                      <td>{r.__techTag}</td>
+                      <td>{r.__unlimitedCH ? "Oui" : "Non"}</td>
+                      <td>{r.__commitless ? "Oui" : "Non"}</td>
+                      <td>{fmtDataGB(r.__dataCH)}</td>
+                      <td>{fmtMin(asNum(r.__raw["appels_suisse_min"]))}</td>
+                      <td>{fmtDataGB(r.__roamGB)}</td>
+                      <td>{fmtMin(r.__roamMin)}</td>
+                      <td className="nowrap">{r.__countries.length ? r.__countries.join(", ") : "-"}</td>
+                      <td>{r.__url ? <a className="chip on cta sm" href={r.__url} target="_blank" rel="noopener noreferrer">Voir l’offre</a> : "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </main>
+
+      <footer className="ftr">© Infinity Business — UI unifiée, filtres puissants & roaming repensé.</footer>
+    </div>
+  );
+}
+
+// =========================
+// Styles (thème unifié + sliders + gravity-space + responsive)
+// =========================
+
+const CSS = `
+*{box-sizing:border-box}
+:root {
+  --bg1: #0b0b12; --bg2: #0d1020; --text: #eef0f7; --muted: rgba(230,235,250,.78);
+  --stroke: rgba(255,255,255,.14); --card: rgba(255,255,255,.06); --panel: rgba(255,255,255,.07);
+  --accentA: #8b5cf6; --accentB: #22d3ee; --ring: rgba(136,84,255,.55);
+  --shadow: 0 10px 28px rgba(0,0,0,.35);
+}
+[data-theme="light"] {
+  --bg1: #f7f8ff; --bg2: #eef1ff; --text: #0b0c12; --muted: rgba(30,36,60,.78);
+  --stroke: rgba(0,0,0,.12); --card: rgba(0,0,0,.03); --panel: rgba(0,0,0,.04);
+  --ring: rgba(136,84,255,.35); --shadow: 0 6px 18px rgba(0,0,0,.08);
+}
+body { margin:0; overflow-x:hidden; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+.page { min-height:100vh; color:var(--text); background:
+  radial-gradient(1200px 600px at calc(var(--mx, .2) * 100%) calc((var(--my, .2) - .2) * 100%), rgba(139,92,246,.22), transparent),
+  radial-gradient(1000px 600px at calc(90% - var(--mx, .2) * 20%) calc(120% - var(--my, .2) * 20%), rgba(34,211,238,.18), transparent),
+  linear-gradient(180deg, var(--bg2), var(--bg1)); background-attachment:fixed; transition: background .3s ease; }
+
+/* Header + logo contour */
+.hdr { position:sticky; top:0; z-index:10; display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 18px; backdrop-filter:blur(12px); background:linear-gradient(180deg, color-mix(in hsl, var(--bg1) 88%, transparent), color-mix(in hsl, var(--bg1) 55%, transparent) 60%, transparent); border-bottom:1px solid var(--stroke); }
+.brand { position:relative; font-weight:900; letter-spacing:.16em; font-size:12px; padding:10px 14px; border-radius:14px; }
+.brand__inner { position:relative; z-index:1; }
+.brand::before { content:""; position:absolute; inset:0; border-radius:14px; padding:1px; background: conic-gradient(from var(--ang), var(--accentA), var(--accentB), var(--accentA)); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; animation: spin 7s linear infinite; }
+@keyframes spin { to { --ang: 360deg; } }
+.hdr__right { display:flex; gap:10px; align-items:center; flex-wrap:wrap }
+
+/* Layout */
+.layout { display:grid; grid-template-columns:340px 1fr; gap:16px; padding:16px; max-width:1400px; margin:0 auto; }
+@media (max-width:1100px){ .layout{ grid-template-columns:1fr } }
+
+.filters { display:flex; flex-direction:column; gap:12px }
+.panel { border:1px solid var(--stroke); background:var(--panel); border-radius:16px; padding:14px; box-shadow: var(--shadow) }
+.panel__title { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.12em; color:var(--muted) }
+
+.row{ display:flex; gap:8px; flex-wrap:wrap } .wrap{ display:flex; flex-wrap:wrap }
+.g1{ gap:6px } .g2{ gap:10px } .r-end{ justify-content:flex-end } .a-center{ align-items:center } .j-between{ justify-content:space-between }
+.twocol{ display:grid; grid-template-columns:1fr 1fr; gap:12px }
+@media (max-width:700px){ .twocol{ grid-template-columns:1fr } }
+
+/* Unified buttons */
+.pill, .chip, .btn, .seg__btn { --bgOn: linear-gradient(90deg, color-mix(in hsl, var(--accentA) 32%, transparent), color-mix(in hsl, var(--accentB) 32%, transparent)); --bgOff: color-mix(in hsl, var(--text) 4%, transparent); --bd: var(--stroke); border:1px solid var(--bd); background:var(--bgOff); color:var(--text); border-radius:999px; cursor:pointer; transition:filter .15s ease, background .2s ease, border-color .2s ease; will-change: transform }
+.pill { padding:7px 11px } .pill.on{ background:var(--bgOn); border-color:color-mix(in hsl, var(--text) 35%, transparent) } .pill:focus-visible{ outline:2px solid var(--ring); outline-offset:2px }
+.chip { padding:6px 10px } .chip.on{ background:var(--bgOn); border-color:color-mix(in hsl, var(--text) 35%, transparent) } .chip.sm{ padding:4px 8px; font-size:12px }
+.btn { padding:8px 12px; border-radius:12px; background:linear-gradient(180deg, color-mix(in hsl, var(--text) 12%, transparent), color-mix(in hsl, var(--text) 6%, transparent)) } .btn:hover{ filter:brightness(1.08) } .btn.sm{ padding:6px 10px; font-size:12px }
+.seg { display:flex; border:1px solid var(--stroke); border-radius:999px; overflow:hidden; padding:2px } .seg__btn{ padding:6px 12px; border:0; background:transparent } .seg__btn.on{ background:var(--bgOn); border:1px solid color-mix(in hsl, var(--text) 35%, transparent); border-radius:999px }
+
+.input{ border:1px solid var(--stroke); border-radius:12px; background:color-mix(in hsl, var(--text) 4%, transparent); color:var(--text); padding:8px 10px }
+
+/* Toggle */
+.toggle{ display:inline-flex; align-items:center; gap:8px } .toggle input{ display:none }
+.toggle .track{ position:relative; width:44px; height:26px; border-radius:999px; border:1px solid var(--stroke); background:color-mix(in hsl, var(--text) 12%, transparent); display:inline-block }
+.toggle .track::after{ content:""; position:absolute; top:3px; left:3px; width:18px; height:18px; border-radius:50%; background:#fff; transition:transform .2s ease }
+.toggle input:checked + .track{ background:linear-gradient(90deg, color-mix(in hsl, var(--accentA) 50%, transparent), color-mix(in hsl, var(--accentB) 50%, transparent)) }
+.toggle input:checked + .track::after{ transform:translateX(18px) }
+.tlabel{ font-size:13px; color:var(--text) }
+
+/* Drop */
+.drop{ border:1px dashed var(--stroke); border-radius:14px; padding:14px; text-align:center; background:color-mix(in hsl, var(--text) 3%, transparent) } .drop input[type=file]{ display:none } .drop.is-over{ border-color:var(--accentA); background:color-mix(in hsl, var(--accentA) 10%, transparent) }
+.paste textarea{ width:100%; height:120px; border-radius:12px; border:1px solid var(--stroke); background:color-mix(in hsl, var(--text) 4%, transparent); color:var(--text); padding:8px }
+.err{ color:#ff4666; background:color-mix(in hsl, #ff4666 10%, transparent); border:1px solid color-mix(in hsl, #ff4666 30%, transparent); padding:8px; border-radius:12px; margin-top:8px }
+.muted{ color:var(--muted); font-size:12px }
+.dim{ opacity:.6 }
+
+/* Country select */
+.csel{ display:flex; flex-direction:column; gap:8px }
+.csel__tools{ display:flex; gap:8px; align-items:center; flex-wrap:wrap }
+.csel__list{ display:flex; flex-wrap:wrap; gap:6px; max-height:160px; overflow:auto; border:1px solid var(--stroke); border-radius:12px; padding:8px; background:color-mix(in hsl, var(--text) 3%, transparent) }
+
+/* Card & table */
+.results{ min-width:0 } .summary{ display:flex; align-items:baseline; gap:10px; margin-bottom:8px } .title{ font-size:18px; font-weight:800 }
+.grid{ display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:12px }
+@media (max-width:1200px){ .grid{ grid-template-columns:repeat(2, minmax(0, 1fr)) } }
+@media (max-width:760px){ .grid{ grid-template-columns:1fr } }
+.card{ background:var(--card); border:1px solid var(--stroke); border-radius:18px; padding:12px; box-shadow:var(--shadow); outline:none; transform:translate3d(calc((var(--mx, .5) - .5) * 2px), calc((var(--my, .5) - .5) * 2px), 0); transition: transform .1s ease }
+.card:hover{ transform:translate3d(calc((var(--mx, .5) - .5) * 6px), calc((var(--my, .5) - .5) * 6px), 0) }
+.card__head{ display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:6px; flex-wrap:wrap }
+.head__left{ display:flex; align-items:baseline; gap:6px; flex-wrap:wrap }
+.op{ font-weight:700 } .bigbold{ font-size:18px; font-weight:900 }
+.offername{ opacity:.9 }
+.priceblock{ display:flex; align-items:center; gap:8px; flex-wrap:wrap }
+.oldprice{ text-decoration: line-through; color:var(--muted); font-size:12px }
+.newprice .big{ font-size:22px; font-weight:900 } .unit{ font-size:12px; color:var(--muted) }
+.discount{ font-weight:700 }
+.promoTag{ font-size:11px; color:#b88700 }
+.specgroup{ margin-top:6px }
+.tags{ display:flex; gap:6px; margin-bottom:8px } .tag{ font-size:11px; border:1px solid var(--stroke); padding:2px 8px; border-radius:999px; color:var(--muted) }
+.specs{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:6px } .spec{ border:1px solid var(--stroke); border-radius:12px; padding:8px; background:color-mix(in hsl, var(--text) 4%, transparent) }
+.spec span{ display:block; color:var(--muted); font-size:11px } .spec b{ font-size:13px } .nowrap{ white-space:nowrap }
+.details{ margin-top:8px; border:1px solid var(--stroke); border-radius:12px; padding:8px; background:color-mix(in hsl, var(--text) 4%, transparent) }
+.details__grid{ display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:8px }
+@media (max-width:720px){ .details__grid{ grid-template-columns:1fr } }
+
+.tablewrap{ border:1px solid var(--stroke); border-radius:16px; background:color-mix(in hsl, var(--text) 4%, transparent); overflow:auto }
+.tbl{ width:100%; border-collapse:collapse } .tbl th,.tbl td{ border-bottom:1px solid var(--stroke); padding:10px 12px; text-align:left; vertical-align:top; max-width:320px; word-break:break-word }
+.tbl th{ position:sticky; top:0; background:color-mix(in hsl, var(--bg1) 85%, transparent); backdrop-filter:blur(8px); font-size:12px; color:var(--muted) }
+
+/* Range styles (shared) */
+.dr__header{ display:flex; justify-content:space-between; align-items:center; margin-bottom:6px }
+.dr__wrap{ position:relative; height:44px }
+.dr__track{ position:absolute; left:0; right:0; top:21px; height:6px; background:color-mix(in hsl, var(--text) 14%, transparent); border-radius:6px }
+.dr__range{ position:absolute; top:21px; height:6px; background:linear-gradient(90deg, var(--accentA), var(--accentB)); border-radius:6px }
+.dr__bubble{ position:absolute; top:0; transform:translateX(-50%); padding:2px 6px; border-radius:8px; background:color-mix(in hsl, var(--text) 10%, transparent); border:1px solid var(--stroke); font-size:11px }
+.dr__wrap input[type=range]{ position:absolute; inset:0; top:8px; height:28px; width:100%; background:transparent; -webkit-appearance:none; appearance:none }
+.dr__wrap input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:18px; height:18px; border-radius:50%; border:1px solid var(--stroke); background:radial-gradient(circle at 30% 30%,#fff 0%,#dfe2ff 60%,#cfd3ff 100%); box-shadow:0 3px 8px rgba(0,0,0,.35) }
+.dr__wrap input[type=range]::-webkit-slider-runnable-track{ height:6px; background:transparent }
+.dr__wrap input[type=range]::-moz-range-thumb{ width:18px; height:18px; border-radius:50%; border:1px solid var(--stroke); background:radial-gradient(circle at 30% 30%,#fff 0%,#dfe2ff 60%,#cfd3ff 100%); box-shadow:0 3px 8px rgba(0,0,0,.35) }
+.dr__wrap input[type=range]::-moz-range-track{ height:6px; background:transparent }
+
+.ftr{ padding:16px 18px; border-top:1px solid var(--stroke); color:var(--muted) }
+`;
